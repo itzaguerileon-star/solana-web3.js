@@ -2,9 +2,19 @@ import fastStableStringify from '@solana/fast-stable-stringify';
 import {
   assertIsAddress,
   assertIsSignature,
+  BASE_ACCOUNT_SIZE,
   DEFAULT_RPC_CONFIG,
   createSolanaRpcApi,
   createRpc,
+  type ClientWithGetMinimumBalance,
+  type ClientWithRpc,
+  type ClientWithRpcSubscriptions,
+  type GetMinimumBalanceConfig,
+  type Lamports,
+  type Rpc,
+  type RpcSubscriptions,
+  type SolanaRpcApi,
+  type SolanaRpcSubscriptionsApi,
   getBase58Encoder,
   getBase64Codec,
   isSolanaError,
@@ -2725,7 +2735,27 @@ type RpcTransportConfig = Readonly<
 /**
  * A connection to a fullnode JSON RPC endpoint
  */
-export class Connection {
+export class Connection
+  implements
+    ClientWithGetMinimumBalance,
+    ClientWithRpc<SolanaRpcApi>,
+    ClientWithRpcSubscriptions<SolanaRpcSubscriptionsApi>
+{
+  /**
+   * The Kit `Rpc` client backing this connection. Exposed to satisfy Kit's
+   * [`ClientWithRpc`](https://www.solanakit.com/api/type-aliases/ClientWithRpc)
+   * interface so a `Connection` can be passed to Kit-based libraries; for
+   * direct calls, prefer the `Connection` methods.
+   */
+  readonly rpc: Rpc<SolanaRpcApi>;
+  /**
+   * The Kit `RpcSubscriptions` client backing this connection. Exposed to
+   * satisfy Kit's
+   * [`ClientWithRpcSubscriptions`](https://www.solanakit.com/api/type-aliases/ClientWithRpcSubscriptions)
+   * interface; for direct subscriptions, prefer the `Connection` `on*Change`
+   * methods.
+   */
+  readonly rpcSubscriptions: RpcSubscriptions<SolanaRpcSubscriptionsApi>;
   /** @internal */ _commitment?: Commitment;
   /** @internal */ _confirmTransactionInitialTimeout?: number;
   /** @internal */ _rpcEndpoint: string;
@@ -2807,6 +2837,7 @@ export class Connection {
 
     const {typedRpc} = createKitRpcClient(endpoint, rpcTransportConfig);
     this._typedRpc = typedRpc;
+    this.rpc = typedRpc;
     const subscriptionController = new ConnectionSubscriptionsController(
       this._subscriptionRegistry,
       () => this._subscriptionsRuntime,
@@ -2817,7 +2848,7 @@ export class Connection {
       notificationEvent => {
         subscriptionController.handleNotification(notificationEvent);
       };
-    this._subscriptionsRuntime = new KitSubscriptionRuntime(
+    const subscriptionsRuntime = new KitSubscriptionRuntime(
       this._rpcWsEndpoint,
       this._subscriptionRegistry,
       {
@@ -2832,6 +2863,8 @@ export class Connection {
       subscriptionChannelConfig,
       this._commitment,
     );
+    this._subscriptionsRuntime = subscriptionsRuntime;
+    this.rpcSubscriptions = subscriptionsRuntime.rpcSubscriptions;
   }
 
   /** @internal */
@@ -4592,6 +4625,26 @@ export class Connection {
       );
     }
   }
+
+  /**
+   * Fetch the minimum rent-exempt balance for an account with `space` bytes of
+   * data, including the 128-byte account header unless `withoutHeader` is set.
+   * Satisfies Kit's
+   * [`ClientWithGetMinimumBalance`](https://www.solanakit.com/api/type-aliases/ClientWithGetMinimumBalance)
+   * interface.
+   */
+  getMinimumBalance = async (
+    space: number,
+    config?: GetMinimumBalanceConfig,
+  ): Promise<Lamports> => {
+    if (config?.withoutHeader) {
+      const dataLength = coerceNumericToBigInt(space, 'space');
+      const headerBalance = await this.getMinimumBalanceForRentExemption(0);
+      const lamportsPerByte = headerBalance / BigInt(BASE_ACCOUNT_SIZE);
+      return rpcLamports(lamportsPerByte * dataLength);
+    }
+    return await this.getMinimumBalanceForRentExemption(space);
+  };
 
   /**
    * Fetch recent performance samples
